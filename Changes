@@ -1,0 +1,52 @@
+Revision history for Devel-MAT-Dumper
+
+0.42    2020-04-24
+        [CHANGES]
+         * Support a -dump_at_WARN flag
+         * Add a new CODEx type to handle nonzero PadnameFLAGS() (RT132414)
+
+        [BUGFIXES]
+         * Ensure perls before 5.18 still write context information
+
+0.41    2019-08-14 23:25:22
+        [CHANGES]
+         * Define another thirdparty XS extension for setting dumper helpers
+           per blessed package
+         * Attach SIGABRT using an unsafe signal handler so it can see the
+           inner workings of C or XS code
+         * Ignore some unimportant savestack entry types
+
+0.40    2019-02-02 17:14:49
+        [CHANGES]
+         * Define an SV extension to notate extra SV information when perl is
+           compiled with -DDEBUG_LEAKING_SCALARS
+
+        [BUGFIXES]
+         * Perl 5.29.7 removed two UTF-8-related root SVs
+         * Don't dump the mortal UV+PVs that are generated as a side-effect of
+           calling dump_optree() on custom ops (related to RT128222)
+
+0.39    2019-01-16 14:20:35
+        [BUGFIXES]
+         * Handle the incorrect value of AvFILL(PL_curstack)
+         * Avoid some (harmless) compiler warnings
+
+0.38    2019-01-14 17:44:15
+        [CHANGES]
+         * Capture saved values of 'local' variables and aggregate slots on
+           perl 5.18+ (RT125918)
+         * Add an entire new (experimental) mechanism for thirdparty XS
+           modules to provide additional annotations for SV to SV references
+         * Define PMAT format 0.4, which adds a table of SV extension sizes
+
+0.37    2018-07-24 17:55:09
+        [CHANGES]
+         * Define PMAT format 0.3, which represents undef SCALARs more
+           efficiently
+
+        [BUGFIXES]
+         * Don't skip SVt_NULL SVs as they are valid undefs (RT125915)
+
+0.36    2018-07-16 20:21:41
+        [CHANGES]
+         * Split from Devel-MAT distribution

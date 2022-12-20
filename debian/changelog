@@ -1,0 +1,31 @@
+libdevel-mat-dumper-perl (0.42-deepin1) unstable; urgency=medium
+
+  * Rebuild
+
+ -- Deepin Packages Builder <packages@deepin.org>  Mon, 14 Nov 2022 17:44:48 +0800
+
+libdevel-mat-dumper-perl (0.42-3) unstable; urgency=medium
+
+  * Tighten runtime dependency on perl.
+    This package compiles Perl version information into the binary module at
+    build time, hence it needs to depend on the exact perl version used at
+    build time.
+    Thanks to Niko Tyni for the bug report and analysis.
+    (Closes: #981408)
+  * Update years of packaging copyright.
+  * Declare compliance with Debian Policy 4.5.1.
+
+ -- gregor herrmann <gregoa@debian.org>  Sun, 31 Jan 2021 01:08:00 +0100
+
+libdevel-mat-dumper-perl (0.42-2) unstable; urgency=medium
+
+  * Update 'DEB_BUILD_MAINT_OPTIONS = hardening=+bindnow' to '=+all'.
+  * Bump debhelper-compat to 13.
+
+ -- gregor herrmann <gregoa@debian.org>  Sat, 13 Jun 2020 03:17:37 +0200
+
+libdevel-mat-dumper-perl (0.42-1) unstable; urgency=low
+
+  * Initial release (closes: #958831)
+
+ -- gregor herrmann <gregoa@debian.org>  Sat, 25 Apr 2020 19:58:49 +0200
