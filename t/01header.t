@@ -1,5 +1,6 @@
 #!/usr/bin/perl
 
+use v5.10;
 use strict;
 use warnings;
 
@@ -35,8 +36,7 @@ is( $flags,
 is( $zero, 0, 'Zero' );
 
 is( $major, 0, 'Major' );
-
-is( $minor, 4, 'Minor' );
+is( $minor, 6, 'Minor' );
 
 my ( $rev, $sub ) = $] =~ m/^5\.(...)(...)$/;
 is( $perlver, ( 5 << 24 ) | ( $rev << 16 ) | ( $sub + 0 ), 'Perlver' );

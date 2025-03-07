@@ -10,7 +10,7 @@ Build-Depends: debhelper-compat (= 13),
                libtest-simple-perl <!nocheck>,
                perl-xs-dev,
                perl:native
-Standards-Version: 4.5.1
+Standards-Version: 4.7.0
 Vcs-Browser: https://salsa.debian.org/perl-team/modules/packages/libdevel-mat-dumper-perl
 Vcs-Git: https://salsa.debian.org/perl-team/modules/packages/libdevel-mat-dumper-perl.git
 Homepage: https://metacpan.org/release/Devel-MAT-Dumper
@@ -22,6 +22,7 @@ Depends: ${misc:Depends},
          ${perl:Depends},
          ${sameperl:Depends},
          ${shlibs:Depends}
+Breaks: libdevel-mat-perl (<< 0.53)
 Description: module to write a heap dump file for later analysis
  Devel::MAT::Dumper provides the memory-dumping function that creates a heap
  dump file which can later be read by Devel::MAT::Dumpfile. It provides a
