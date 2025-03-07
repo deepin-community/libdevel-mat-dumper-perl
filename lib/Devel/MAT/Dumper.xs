@@ -1,7 +1,7 @@
 /*  You may distribute under the terms of either the GNU General Public License
  *  or the Artistic License (the same terms as Perl itself)
  *
- *  (C) Paul Evans, 2013-2019 -- leonerd@leonerd.org.uk
+ *  (C) Paul Evans, 2013-2024 -- leonerd@leonerd.org.uk
  */
 
 #include "EXTERN.h"
@@ -14,7 +14,7 @@
 #include <stdio.h>
 
 #define FORMAT_VERSION_MAJOR 0
-#define FORMAT_VERSION_MINOR 4
+#define FORMAT_VERSION_MINOR 6
 
 #ifndef SvOOK_offset
 #  define SvOOK_offset(sv, len) STMT_START { len = SvIVX(sv); } STMT_END
@@ -37,6 +37,10 @@
 #  define CxOLD_OP_TYPE(cx) ((cx)->blk_eval.old_op_type)
 #endif
 
+#ifdef ObjectFIELDS
+#  define HAVE_FEATURE_CLASS
+#endif
+
 static int max_string;
 
 #if NVSIZE == 8
@@ -45,7 +49,17 @@ static int max_string;
 #  define PMAT_NVSIZE 10
 #endif
 
-#if (PERL_REVISION == 5) && (PERL_VERSION >= 26)
+#if (PERL_REVISION == 5) && (PERL_VERSION >= 38)
+#  define SAVEt_ARG0_MAX  SAVEt_REGCONTEXT
+#  define SAVEt_ARG1_MAX  SAVEt_FREERCPV
+#  define SAVEt_ARG2_MAX  SAVEt_RCPV
+#  define SAVEt_MAX       SAVEt_HINTS_HH
+#elif (PERL_REVISION == 5) && (PERL_VERSION >= 34)
+#  define SAVEt_ARG0_MAX  SAVEt_REGCONTEXT
+#  define SAVEt_ARG1_MAX  SAVEt_STRLEN_SMALL
+#  define SAVEt_ARG2_MAX  SAVEt_APTR
+#  define SAVEt_MAX       SAVEt_HINTS_HH
+#elif (PERL_REVISION == 5) && (PERL_VERSION >= 26)
 #  define SAVEt_ARG0_MAX  SAVEt_REGCONTEXT
 #  define SAVEt_ARG1_MAX  SAVEt_FREEPADNAME
 #  define SAVEt_ARG2_MAX  SAVEt_APTR
@@ -72,24 +86,28 @@ static SV *make_tmp_iv(IV iv)
 static uint8_t sv_sizes[] = {
   /* Header                   PTRs,  STRs */
   4 + PTRSIZE + UVSIZE,       1,     0,     /* common SV */
-  UVSIZE,                     8,     2,     /* GLOB */
+  UVSIZE + PTRSIZE,           8,     2,     /* GLOB */
   1 + 2*UVSIZE + PMAT_NVSIZE, 1,     1,     /* SCALAR */
   1,                          2,     0,     /* REF */
   1 + UVSIZE,                 0,     0,     /* ARRAY + has body */
   UVSIZE,                     1,     0,     /* HASH + has body */
   UVSIZE + 0,                 1 + 4, 0 + 1, /* STASH = extends HASH */
-  5 + UVSIZE + PTRSIZE,       5,     2,     /* CODE + has body */
+  5 + UVSIZE + 2*PTRSIZE,     5,     2,     /* CODE + has body */
   2*UVSIZE,                   3,     0,     /* IO */
   1 + 2*UVSIZE,               1,     0,     /* LVALUE */
   0,                          0,     0,     /* REGEXP */
   0,                          0,     0,     /* FORMAT */
   0,                          0,     0,     /* INVLIST */
   0,                          0,     0,     /* UNDEF */
+  0,                          0,     0,     /* YES */
+  0,                          0,     0,     /* NO */
+  UVSIZE,                     0,     0,     /* OBJECT */
+  UVSIZE + 0,                 1+4+1, 0+1,   /* CLASS = extends STASH */
 };
 
 static uint8_t svx_sizes[] = {
   /* Header   PTRs   STRs */
-  2,          2,     0,     /* magic */
+  2,          3,     0,     /* magic */
   0,          1,     0,     /* saved SV */
   0,          1,     0,     /* saved AV */
   0,          1,     0,     /* saved HV */
@@ -98,6 +116,7 @@ static uint8_t svx_sizes[] = {
   0,          1,     0,     /* saved CV */
   0,          1,     1,     /* SV->SV annotation */
   2*UVSIZE,   0,     1,     /* SV leak report */
+  PTRSIZE,    0,     0,     /* PV shared HEK */
 };
 
 static uint8_t ctx_sizes[] = {
@@ -123,6 +142,12 @@ enum PMAT_SVt {
   PMAT_SVtFORMAT,
   PMAT_SVtINVLIST,
   PMAT_SVtUNDEF,
+  PMAT_SVtYES,
+  PMAT_SVtNO,
+  PMAT_SVtOBJ,
+  PMAT_SVtCLASS,
+
+  PMAT_SVtSTRUCT      = 0x7F,  /* fields as described by corresponding META_STRUCT */
 
   /* TODO: emit these in DMD_helper.h */
   PMAT_SVxMAGIC = 0x80,
@@ -134,6 +159,9 @@ enum PMAT_SVt {
   PMAT_SVxSAVED_CV,
   PMAT_SVxSVSVnote,
   PMAT_SVxDEBUGREPORT,
+  PMAT_SVxPV_SHARED_HEK,
+
+  PMAT_SVtMETA_STRUCT = 0xF0,
 };
 
 enum PMAT_CODEx {
@@ -146,6 +174,11 @@ enum PMAT_CODEx {
   PMAT_CODEx_PADNAMES = 7,
   PMAT_CODEx_PAD,
   PMAT_CODEx_PADNAME_FLAGS,
+  PMAT_CODEx_PADNAME_FIELD,
+};
+
+enum PMAT_CLASSx {
+  PMAT_CLASSx_FIELD = 1,
 };
 
 enum PMAT_CTXt {
@@ -154,10 +187,17 @@ enum PMAT_CTXt {
   PMAT_CTXtEVAL,
 };
 
-typedef int DMD_Helper(pTHX_ SV const *sv);
+/* API v0.44 */
+typedef struct {
+  FILE *fh;
+  int next_structid;
+  HV *structdefs;
+} DMDContext;
+
+typedef int DMD_Helper(pTHX_ DMDContext *ctx, SV const *sv);
 static HV *helper_per_package;
 
-typedef int DMD_MagicHelper(pTHX_ SV const *sv, MAGIC *mg);
+typedef int DMD_MagicHelper(pTHX_ DMDContext *ctx, SV const *sv, MAGIC *mg);
 static HV *helper_per_magic;
 
 static void write_u8(FILE *fh, uint8_t v)
@@ -189,7 +229,7 @@ static void write_uint(FILE *fh, UV v)
 #endif
 }
 
-static void write_ptr(FILE *fh, void *ptr)
+static void write_ptr(FILE *fh, const void *ptr)
 {
   fwrite(&ptr, sizeof ptr, 1, fh);
 }
@@ -297,6 +337,7 @@ static void write_private_gv(FILE *fh, const GV *gv)
   if(isGV_with_GP(gv)) {
     // Header
     write_uint(fh, GvLINE(gv));
+    write_ptr(fh, GvNAME_HEK(gv));
 
     // PTRs
     write_svptr(fh, (SV*)GvSTASH(gv));
@@ -315,6 +356,7 @@ static void write_private_gv(FILE *fh, const GV *gv)
   else {
     // Header
     write_uint(fh, 0);
+    write_ptr(fh, NULL);
 
     // PTRs
     write_svptr(fh, (SV*)GvSTASH(gv));
@@ -380,6 +422,13 @@ static void write_private_sv(FILE *fh, const SV *sv)
   }
   else
     write_str(fh, NULL);
+
+  // Extensions
+  if(SvPOKp(sv) && SvIsCOW_shared_hash(sv)) {
+    write_u8(fh, PMAT_SVxPV_SHARED_HEK);
+    write_svptr(fh, sv);
+    write_ptr(fh, SvSHARED_HEK_FROM_PV(SvPVX_const(sv)));
+  }
 }
 
 static void write_private_rv(FILE *fh, const SV *rv)
@@ -457,9 +506,19 @@ static void write_hv_body_elems(FILE *fh, const HV *hv)
   for(bucket = 0; bucket <= HvMAX(hv); bucket++) {
     HE *he;
     for(he = HvARRAY(hv)[bucket]; he; he = he->hent_next) {
-      STRLEN len;
-      char *key = HePV(he, len);
-      write_strn(fh, key, len);
+      STRLEN keylen;
+      char *keypv = HePV(he, keylen);
+      write_strn(fh, keypv, keylen);
+
+      HEK *hek = HeKEY_hek(he);
+      bool hek_is_shared =
+#ifdef HVhek_NOTSHARED
+        !(HEK_FLAGS(hek) & HVhek_NOTSHARED);
+#else
+        true;
+#endif
+      write_ptr(fh, hek_is_shared ? hek : NULL);
+
       write_svptr(fh, is_strtab ? NULL : HeVAL(he));
     }
   }
@@ -483,18 +542,10 @@ static void write_private_hv(FILE *fh, const HV *hv)
     write_hv_body_elems(fh, hv);
 }
 
-static void write_private_stash(FILE *fh, const HV *stash)
+static void write_stash_ptrs(FILE *fh, const HV *stash)
 {
   struct mro_meta *mro_meta = HvAUX(stash)->xhv_mro_meta;
 
-  int nkeys = write_hv_header(fh, stash,
-    sizeof(struct xpvhv_aux) + (mro_meta ? sizeof(struct mro_meta) : 0));
-
-  // Header
-  // HASH
-  write_uint(fh, nkeys);
-
-  // PTRs
   if(SvOOK(stash) && HvAUX(stash))
     write_svptr(fh, (SV*)HvAUX(stash)->xhv_backreferences);
   else
@@ -520,6 +571,21 @@ static void write_private_stash(FILE *fh, const HV *stash)
     write_svptr(fh, NULL);
     write_svptr(fh, NULL);
   }
+}
+
+static void write_private_stash(FILE *fh, const HV *stash)
+{
+  struct mro_meta *mro_meta = HvAUX(stash)->xhv_mro_meta;
+
+  int nkeys = write_hv_header(fh, stash,
+    sizeof(struct xpvhv_aux) + (mro_meta ? sizeof(struct mro_meta) : 0));
+
+  // Header
+  // HASH
+  write_uint(fh, nkeys);
+
+  // PTRs
+  write_stash_ptrs(fh, stash);
 
   // STRs
   write_str(fh, HvNAME(stash));
@@ -571,6 +637,12 @@ static void write_private_cv(FILE *fh, const CV *cv)
     write_ptr(fh, NULL);
 
   write_u32(fh, CvDEPTH(cv));
+  // CvNAME_HEK doesn't take a const CV *, but we know it won't modify
+#ifdef CvNAME_HEK
+  write_ptr(fh, CvNAME_HEK((CV *)cv));
+#else
+  write_ptr(fh, NULL);
+#endif
 
   // PTRs
   write_svptr(fh, (SV*)CvSTASH(cv));
@@ -639,13 +711,28 @@ static void write_private_cv(FILE *fh, const CV *cv)
         write_svptr(fh, (SV*)PadnameOURSTASH(pn));
 
         if(PadnameFLAGS(pn)) {
-          write_u8(fh, PMAT_CODEx_PADNAME_FLAGS);
-          write_uint(fh, padix);
-          write_u8(fh, (PadnameOUTER(pn)   ? 0x01 : 0) |
-                       (PadnameIsSTATE(pn) ? 0x02 : 0) |
-                       (PadnameLVALUE(pn)  ? 0x04 : 0) |
-                       (PadnameFLAGS(pn) & PADNAMEt_TYPED ? 0x08 : 0) |
-                       (PadnameFLAGS(pn) & PADNAMEt_OUR   ? 0x10 : 0));
+          uint8_t flags = 0;
+
+          if(PadnameOUTER(pn))   flags |= 0x01;
+          if(PadnameIsSTATE(pn)) flags |= 0x02;
+          if(PadnameLVALUE(pn))  flags |= 0x04;
+          if(PadnameFLAGS(pn) & PADNAMEt_TYPED) flags |= 0x08;
+          if(PadnameFLAGS(pn) & PADNAMEt_OUR)   flags |= 0x10;
+
+          if(flags) {
+            write_u8(fh, PMAT_CODEx_PADNAME_FLAGS);
+            write_uint(fh, padix);
+            write_u8(fh, flags);
+          }
+
+#ifdef HAVE_FEATURE_CLASS
+          if(PadnameIsFIELD(pn)) {
+            write_u8(fh, PMAT_CODEx_PADNAME_FIELD);
+            write_uint(fh, padix);
+            write_uint(fh, PadnameFIELDINFO(pn)->fieldix);
+            write_svptr(fh, (SV *)PadnameFIELDINFO(pn)->fieldstash);
+          }
+#endif
         }
       }
     }
@@ -694,6 +781,61 @@ static void write_private_lv(FILE *fh, const SV *sv)
   write_svptr(fh, LvTARG(sv));
 }
 
+#ifdef HAVE_FEATURE_CLASS
+static void write_private_obj(FILE *fh, const SV *obj)
+{
+  int nfields = ObjectMAXFIELD(obj) + 1;
+
+  write_common_sv(fh, obj, sizeof(XPVOBJ));
+
+  // Header
+  write_uint(fh, nfields);
+
+  SV **fields = ObjectFIELDS(obj);
+  int i;
+  for(i = 0; i < nfields; i++)
+    write_svptr(fh, fields[i]);
+}
+
+static void write_private_class(FILE *fh, const HV *cls)
+{
+  struct mro_meta *mro_meta = HvAUX(cls)->xhv_mro_meta;
+
+  int nkeys = write_hv_header(fh, cls,
+    sizeof(struct xpvhv_aux) + (mro_meta ? sizeof(struct mro_meta) : 0));
+
+  // Header
+  // HASH
+  write_uint(fh, nkeys);
+
+  // PTRs
+  write_stash_ptrs(fh, cls);
+  write_ptr(fh, HvAUX(cls)->xhv_class_adjust_blocks);
+
+  // STRs
+  write_str(fh, HvNAME(cls));
+
+  // Body
+  if(HvARRAY(cls))
+    write_hv_body_elems(fh, cls);
+
+  {
+    PADNAMELIST *fields = HvAUX(cls)->xhv_class_fields;
+
+    int nfields = PadnamelistMAX(fields)+1;
+    for(int i = 0; i < nfields; i++) {
+      PADNAME *pn = PadnamelistARRAY(fields)[i];
+
+      write_u8(fh, PMAT_CLASSx_FIELD);
+      write_uint(fh, PadnameFIELDINFO(pn)->fieldix);
+      write_str(fh, PadnamePV(pn));
+    }
+  }
+
+  write_u8(fh, 0);
+}
+#endif
+
 static void write_annotations_from_stack(FILE *fh, int n)
 {
   dSP;
@@ -716,8 +858,32 @@ static void write_annotations_from_stack(FILE *fh, int n)
   }
 }
 
-static void write_sv(FILE *fh, const SV *sv)
+static void run_package_helpers(DMDContext *ctx, const SV *sv, SV *classname)
 {
+  FILE *fh = ctx->fh;
+  HE *he;
+
+  DMD_Helper *helper = NULL;
+  if((he = hv_fetch_ent(helper_per_package, classname, 0, 0)))
+    helper = (DMD_Helper *)SvUV(HeVAL(he));
+
+  if(helper) {
+    ENTER;
+    SAVETMPS;
+
+    int ret = (*helper)(aTHX_ ctx, sv);
+
+    if(ret > 0)
+      write_annotations_from_stack(fh, ret);
+
+    FREETMPS;
+    LEAVE;
+  }
+}
+
+static void write_sv(DMDContext *ctx, const SV *sv)
+{
+  FILE *fh = ctx->fh;
   unsigned char type = -1;
   switch(SvTYPE(sv)) {
     case SVt_NULL:
@@ -742,10 +908,23 @@ static void write_sv(FILE *fh, const SV *sv)
     case SVt_PVLV: type = PMAT_SVtLVALUE; break;
     case SVt_PVAV: type = PMAT_SVtARRAY; break;
     // HVs with names we call STASHes
-    case SVt_PVHV: type = HvNAME(sv) ? PMAT_SVtSTASH : PMAT_SVtHASH; break;
+    case SVt_PVHV:
+#ifdef HAVE_FEATURE_CLASS
+      if(HvNAME(sv) && HvSTASH_IS_CLASS(sv))
+        type = PMAT_SVtCLASS;
+      else
+#endif
+      if(HvNAME(sv))
+        type = PMAT_SVtSTASH;
+      else
+        type = PMAT_SVtHASH;
+      break;
     case SVt_PVCV: type = PMAT_SVtCODE; break;
     case SVt_PVFM: type = PMAT_SVtFORMAT; break;
     case SVt_PVIO: type = PMAT_SVtIO; break;
+#ifdef HAVE_FEATURE_CLASS
+    case SVt_PVOBJ: type = PMAT_SVtOBJ; break;
+#endif
     default:
       fprintf(stderr, "dumpsv %p has unknown SvTYPE %d\n", sv, SvTYPE(sv));
       break;
@@ -753,6 +932,11 @@ static void write_sv(FILE *fh, const SV *sv)
 
   if(type == PMAT_SVtSCALAR && !SvOK(sv))
     type = PMAT_SVtUNDEF;
+#if (PERL_REVISION == 5) && (PERL_VERSION >= 35)
+  if(type == PMAT_SVtSCALAR && SvIsBOOL(sv))
+    /* SvTRUE() et al. might mutate; but it's OK we know this is one of the bools */
+    type = (SvIVX(sv)) ? PMAT_SVtYES : PMAT_SVtNO;
+#endif
 
   write_u8(fh, type);
 
@@ -766,6 +950,10 @@ static void write_sv(FILE *fh, const SV *sv)
     case PMAT_SVtCODE:   write_private_cv   (fh, (CV*)sv); break;
     case PMAT_SVtIO:     write_private_io   (fh, (IO*)sv); break;
     case PMAT_SVtLVALUE: write_private_lv   (fh,      sv); break;
+#ifdef HAVE_FEATURE_CLASS
+    case PMAT_SVtOBJ:    write_private_obj(fh, sv); break;
+    case PMAT_SVtCLASS:  write_private_class(fh, (HV*)sv); break;
+#endif
 
 #if (PERL_REVISION == 5) && (PERL_VERSION >= 12)
     case PMAT_SVtREGEXP: write_common_sv(fh, sv, sizeof(regexp)); break;
@@ -773,6 +961,8 @@ static void write_sv(FILE *fh, const SV *sv)
     case PMAT_SVtFORMAT: write_common_sv(fh, sv, sizeof(XPVFM)); break;
     case PMAT_SVtINVLIST: write_common_sv(fh, sv, sizeof(XPV) + SvLEN(sv)); break;
     case PMAT_SVtUNDEF:  write_common_sv(fh, sv, 0); break;
+    case PMAT_SVtYES:    write_common_sv(fh, sv, 0); break;
+    case PMAT_SVtNO:     write_common_sv(fh, sv, 0); break;
   }
 
   if(SvMAGICAL(sv)) {
@@ -787,19 +977,24 @@ static void write_sv(FILE *fh, const SV *sv)
         write_svptr(fh, (SV*)mg->mg_ptr);
       else
         write_svptr(fh, NULL);
+      write_svptr(fh, (SV *)mg->mg_virtual); /* Not really an SV */
 
       if(mg->mg_type == PERL_MAGIC_ext &&
          mg->mg_ptr && mg->mg_len != HEf_SVKEY) {
+        SV *key = make_tmp_iv((IV)mg->mg_virtual);
         HE *he;
 
-        he = hv_fetch_ent(helper_per_magic, make_tmp_iv((IV)mg->mg_virtual), 0, 0);
-        if(he) {
-          DMD_MagicHelper *helperfunc = (DMD_MagicHelper *)SvUV(HeVAL(he));
+        DMD_MagicHelper *helper = NULL;
+        he = hv_fetch_ent(helper_per_magic, key, 0, 0);
+        if(he)
+          helper = (DMD_MagicHelper *)SvUV(HeVAL(he));
 
+        if(helper) {
           ENTER;
           SAVETMPS;
 
-          int ret = (*helperfunc)(aTHX_ sv, mg);
+          int ret = (helper)(aTHX_ ctx, sv, mg);
+
           if(ret > 0)
             write_annotations_from_stack(fh, ret);
 
@@ -811,22 +1006,9 @@ static void write_sv(FILE *fh, const SV *sv)
   }
 
   if(SvOBJECT(sv)) {
-    HV *stash = SvSTASH(sv);
-    SV **helpersv = hv_fetch(helper_per_package, HvNAME(stash), HvNAMELEN(stash), 0);
-
-    if(helpersv) {
-      DMD_Helper *helperfunc = (DMD_Helper *)SvUV(*helpersv);
-
-      ENTER;
-      SAVETMPS;
-
-      int ret = (*helperfunc)(aTHX_ sv);
-      if(ret > 0)
-        write_annotations_from_stack(fh, ret);
-
-      FREETMPS;
-      LEAVE;
-    }
+    AV *linearized_mro = mro_get_linear_isa(SvSTASH(sv));
+    for(SSize_t i = 0; i <= AvFILL(linearized_mro); i++)
+      run_package_helpers(ctx, sv, AvARRAY(linearized_mro)[i]);
   }
 
 #ifdef DEBUG_LEAKING_SCALARS
@@ -841,6 +1023,89 @@ static void write_sv(FILE *fh, const SV *sv)
     write_str(fh, sv->sv_debug_file);
   }
 #endif
+}
+
+typedef struct
+{
+   const char *name;
+   enum {
+      DMD_FIELD_PTR,
+      DMD_FIELD_BOOL,
+      DMD_FIELD_U8,
+      DMD_FIELD_U32,
+      DMD_FIELD_UINT,
+   }           type;
+   struct {
+      void       *ptr;
+      bool        b;
+      long        n;
+   };
+} DMDNamedField;
+
+typedef struct
+{
+   const char *name;
+   const char *str;
+   size_t      len;
+} DMDNamedString;
+
+static void writestruct(pTHX_ DMDContext *ctx, const char *name, void *addr, size_t size,
+   size_t nfields, const DMDNamedField fields[])
+{
+  FILE *fh = ctx->fh;
+
+  if(!ctx->structdefs)
+    ctx->structdefs = newHV();
+
+  SV *idsv = *hv_fetch(ctx->structdefs, name, strlen(name), 1);
+  if(!SvOK(idsv)) {
+    int structid = ctx->next_structid;
+    ctx->next_structid++;
+
+    sv_setiv(idsv, structid);
+
+    write_u8(fh, PMAT_SVtMETA_STRUCT);
+    write_uint(fh, structid);
+    write_uint(fh, nfields);
+    write_str(fh, name);
+    for(size_t i = 0; i < nfields; i++) {
+      write_str(fh, fields[i].name);
+      write_u8(fh,  fields[i].type);
+    }
+  }
+
+  write_u8(fh, PMAT_SVtSTRUCT);
+  /* Almost the same layout as write_common_sv() */
+  // Header for common
+  write_svptr(fh, addr);
+  write_u32(fh, -1);
+  write_uint(fh, size);
+  // PTRs for common
+  write_svptr(fh, NUM2PTR(SV *, SvIV(idsv))); /* abuse the stash pointer to store the descriptor ID */
+
+  // Body
+  for(size_t i = 0; i < nfields; i++)
+    switch(fields[i].type) {
+      case DMD_FIELD_PTR:
+        write_ptr(fh, fields[i].ptr);
+        break;
+
+      case DMD_FIELD_BOOL:
+        write_u8(fh, fields[i].b);
+        break;
+
+      case DMD_FIELD_U8:
+        write_u8(fh, fields[i].n);
+        break;
+
+      case DMD_FIELD_U32:
+        write_u32(fh, fields[i].n);
+        break;
+
+      case DMD_FIELD_UINT:
+        write_uint(fh, fields[i].n);
+        break;
+    }
 }
 
 #if (PERL_REVISION == 5) && (PERL_VERSION < 14)
@@ -907,6 +1172,11 @@ static const PERL_CONTEXT *caller_cx(int count, void *ignore)
 static void dumpfh(FILE *fh)
 {
   max_string = SvIV(get_sv("Devel::MAT::Dumper::MAX_STRING", GV_ADD));
+
+  DMDContext ctx = {
+    .fh = fh,
+    .next_structid = 0,
+  };
 
   // Header
   fwrite("PMAT", 4, 1, fh);
@@ -1063,12 +1333,27 @@ static void dumpfh(FILE *fh)
 #endif
   };
 
-  write_u32(fh, sizeof(roots) / sizeof(roots[0]));
+  AV *moreroots = get_av("Devel::MAT::Dumper::MORE_ROOTS", 0);
+
+  int nroots = sizeof(roots) / sizeof(roots[0]);
+  if(moreroots)
+    nroots += (AvFILL(moreroots)+1) / 2;
+
+  write_u32(fh, nroots);
 
   int i;
   for(i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
     write_str(fh, roots[i].name);
     write_svptr(fh, roots[i].ptr);
+  }
+  if(moreroots) {
+    SV **svp = AvARRAY(moreroots);
+    int max = AvFILL(moreroots);
+
+    for(i = 0; i < max; i += 2) {
+      write_str(fh, SvPV_nolen(svp[i]));
+      write_svptr(fh, svp[i+1]);
+    }
   }
 
   // Stack
@@ -1094,7 +1379,7 @@ static void dumpfh(FILE *fh)
           continue;
       }
 
-      write_sv(fh, sv);
+      write_sv(&ctx, sv);
 
       if(sv == (const SV *)PL_defstash)
         seen_defstash = true;
@@ -1103,7 +1388,7 @@ static void dumpfh(FILE *fh)
 
   // and a few other things that don't actually appear in the arena
   if(!seen_defstash)
-    write_sv(fh, (const SV *)PL_defstash);
+    write_sv(&ctx, (const SV *)PL_defstash);
 
   // Savestack
 #if (PERL_REVISION == 5) && (PERL_VERSION >= 18)
@@ -1152,6 +1437,7 @@ static void dumpfh(FILE *fh)
       case SAVEt_BOOL:
       case SAVEt_COMPPAD:
       case SAVEt_FREEOP:
+      case SAVEt_FREEPV:
       case SAVEt_FREESV:
       case SAVEt_I16:
       case SAVEt_I32_SMALL:
@@ -1162,6 +1448,9 @@ static void dumpfh(FILE *fh)
       case SAVEt_PARSER:
       case SAVEt_SHARED_PVREF:
       case SAVEt_SPTR:
+#if (PERL_REVISION == 5) && (PERL_VERSION >= 38)
+      case SAVEt_FREERCPV:
+#endif
 
       case SAVEt_DESTRUCTOR:
       case SAVEt_DESTRUCTOR_X:
@@ -1169,12 +1458,22 @@ static void dumpfh(FILE *fh)
       case SAVEt_I32:
       case SAVEt_INT:
       case SAVEt_IV:
+#if (PERL_REVISION == 5) && (PERL_VERSION <= 40)
+      /* was removed in 5.41.3 */
       case SAVEt_LONG:
+#endif
 #if (PERL_REVISION == 5) && (PERL_VERSION >= 20)
       case SAVEt_STRLEN:
 #endif
+#if (PERL_REVISION == 5) && (PERL_VERSION >= 34)
+      case SAVEt_STRLEN_SMALL:
+#endif
+      case SAVEt_SAVESWITCHSTACK:
       case SAVEt_VPTR:
       case SAVEt_ADELETE:
+#if (PERL_REVISION == 5) && (PERL_VERSION >= 38)
+      case SAVEt_RCPV:
+#endif
 
       case SAVEt_DELETE:
         /* ignore */
@@ -1313,6 +1612,19 @@ static void dumpfh(FILE *fh)
   }
 
   write_u8(fh, 0);
+
+  // Mortals stack
+  {
+    // Mortal stack is a pre-inc stack
+    write_uint(fh, PL_tmps_ix + 1);
+    for(SSize_t i = 0; i <= PL_tmps_ix; i++) {
+      write_ptr(fh, PL_tmps_stack[i]);
+    }
+    write_uint(fh, PL_tmps_floor);
+  }
+
+  if(ctx.structdefs)
+    SvREFCNT_dec((SV *)ctx.structdefs);
 }
 
 MODULE = Devel::MAT::Dumper        PACKAGE = Devel::MAT::Dumper
@@ -1333,5 +1645,20 @@ void
 dumpfh(FILE *fh)
 
 BOOT:
-  helper_per_package = get_hv("Devel::MAT::Dumper::HELPER_PER_PACKAGE", GV_ADD);
-  helper_per_magic   = get_hv("Devel::MAT::Dumper::HELPER_PER_MAGIC", GV_ADD);
+  SV *sv, **svp;
+
+  if((svp = hv_fetchs(PL_modglobal, "Devel::MAT::Dumper/%helper_per_package", 0)))
+    sv = *svp;
+  else
+    hv_stores(PL_modglobal, "Devel::MAT::Dumper/%helper_per_package",
+      sv = newRV_noinc((SV *)(newHV())));
+  helper_per_package = (HV *)SvRV(sv);
+
+  if((svp = hv_fetchs(PL_modglobal, "Devel::MAT::Dumper/%helper_per_magic", 0)))
+    sv = *svp;
+  else
+    hv_stores(PL_modglobal, "Devel::MAT::Dumper/%helper_per_magic",
+      sv = newRV_noinc((SV *)(newHV())));
+  helper_per_magic = (HV *)SvRV(sv);
+
+  sv_setiv(*hv_fetchs(PL_modglobal, "Devel::MAT::Dumper/writestruct()", 1), PTR2UV(&writestruct));

@@ -1,14 +1,15 @@
 #  You may distribute under the terms of either the GNU General Public License
 #  or the Artistic License (the same terms as Perl itself)
 #
-#  (C) Paul Evans, 2013-2018 -- leonerd@leonerd.org.uk
+#  (C) Paul Evans, 2013-2024 -- leonerd@leonerd.org.uk
 
 package Devel::MAT::Dumper;
 
+use v5.10;
 use strict;
 use warnings;
 
-our $VERSION = '0.42';
+our $VERSION = '0.50';
 
 use File::Basename qw( basename );
 use File::Spec;
@@ -23,9 +24,11 @@ C<Devel::MAT::Dumper> - write a heap dump file for later analysis
 
 =head1 SYNOPSIS
 
- use Devel::MAT::Dumper;
+=for highlighter language=perl
 
- Devel::MAT::Dumper::dump( "path/to/the/file.pmat" );
+   use Devel::MAT::Dumper;
+
+   Devel::MAT::Dumper::dump( "path/to/the/file.pmat" );
 
 =head1 DESCRIPTION
 
@@ -47,6 +50,8 @@ elsewhere.
 =cut
 
 =head1 IMPORT OPTIONS
+
+=for highlighter
 
 The following C<import> options control the behaviour of the module. They may
 primarily be useful when used in the C<-M> perl option:
@@ -250,17 +255,19 @@ sub import
 
 =head1 FUNCTIONS
 
+=for highlighter language=perl
+
 These functions are not exported, they must be called fully-qualified.
 
 =head2 dump
 
-   dump( $path )
+   dump( $path );
 
 Writes a heap dump to the named file
 
 =head2 dumpfh
 
-   dumpfh( $fh )
+   dumpfh( $fh );
 
 Writes a heap dump to the given filehandle (which must be a plain OS-level
 filehandle, though does not need to be a regular file, or seekable).
